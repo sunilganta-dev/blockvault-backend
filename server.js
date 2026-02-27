@@ -16,7 +16,7 @@ const WS_PORT = 5501;
 const blockchain = new Blockchain();
 
 // -------------------- Serve frontend --------------------
-const FRONTEND_DIR = path.resolve("../frontend");
+const FRONTEND_DIR = path.resolve("../blockvaultprivate/api-gateway/public");
 app.use(express.static(FRONTEND_DIR));
 
 // -------------------- Evidence setup --------------------
