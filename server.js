@@ -28,10 +28,6 @@ const EVIDENCE_DIR = path.join(FRONTEND_DIR, "evidence");
 if (!fs.existsSync(EVIDENCE_DIR)) fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
 app.use("/evidence", express.static(EVIDENCE_DIR));
 
-app.get("/", (req, res) => {
-  res.sendFile(path.join(FRONTEND_DIR, "index.html"));
-});
-
 // -------------------- WebSocket --------------------
 const wss = new WebSocketServer({ port: WS_PORT });
 wss.on("connection", () => {
