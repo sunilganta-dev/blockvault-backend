@@ -187,7 +187,7 @@ app.get("/review", (req, res) => {
 });
 
 // -------------------- Startup logs --------------------
-app.listen(HTTP_PORT, () =>
-  console.log(`✅ Demo running → http://localhost:${HTTP_PORT}/index.html`)
-);
+app.listen(HTTP_PORT, "0.0.0.0", () => {
+  console.log(`✅ Demo running → http://0.0.0.0:${HTTP_PORT}/index.html`);
+});
 console.log(`🌐 WebSocket → ws://localhost:${WS_PORT}`);
