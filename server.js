@@ -16,13 +16,17 @@ const WS_PORT = 5501;
 const blockchain = new Blockchain();
 
 // -------------------- Serve frontend --------------------
-const FRONTEND_DIR = path.resolve("../blockvaultprivate/api-gateway/public");
+const FRONTEND_DIR = "/home/ubuntu/blockvaultprivate/api-gateway/public";
 app.use(express.static(FRONTEND_DIR));
 
 // -------------------- Evidence setup --------------------
 const EVIDENCE_DIR = path.join(FRONTEND_DIR, "evidence");
 if (!fs.existsSync(EVIDENCE_DIR)) fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
 app.use("/evidence", express.static(EVIDENCE_DIR));
+
+app.get("/", (req, res) => {
+  res.sendFile(path.join(FRONTEND_DIR, "index.html"));
+});
 
 // -------------------- WebSocket --------------------
 const wss = new WebSocketServer({ port: WS_PORT });
