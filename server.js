@@ -19,6 +19,10 @@ const blockchain = new Blockchain();
 const FRONTEND_DIR = "/home/ubuntu/blockvaultprivate/api-gateway/public";
 app.use(express.static(FRONTEND_DIR));
 
+app.get("/", (req, res) => {
+  res.sendFile(path.join(FRONTEND_DIR, "index.html"));
+});
+
 // -------------------- Evidence setup --------------------
 const EVIDENCE_DIR = path.join(FRONTEND_DIR, "evidence");
 if (!fs.existsSync(EVIDENCE_DIR)) fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
