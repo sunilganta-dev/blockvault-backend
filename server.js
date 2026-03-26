@@ -1,8 +1,10 @@
 // backend/server.js
 import express from "express";
 import cors from "cors";
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { WebSocketServer } from "ws";
 import { Blockchain } from "./blockchain.js";
 
@@ -15,11 +17,76 @@ const WS_PORT = 5501;
 
 const blockchain = new Blockchain();
 
+// -------------------- Face Recognition Queue --------------------
+const FACE_SERVICE_URL = "http://localhost:8001";
+const faceQueue = [];
+const activeAnalyses = new Set();
+const FR_CONCURRENCY = 2;
+
+async function callFaceService(imageBase64, cameraId) {
+  const resp = await fetch(`${FACE_SERVICE_URL}/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ imageBase64, cameraId }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!resp.ok) throw new Error(`FR service HTTP ${resp.status}`);
+  return resp.json();
+}
+
+function pumpFaceQueue() {
+  while (faceQueue.length > 0 && activeAnalyses.size < FR_CONCURRENCY) {
+    const job = faceQueue.shift();
+    activeAnalyses.add(job.blockIndex);
+    runFaceJob(job).finally(() => {
+      activeAnalyses.delete(job.blockIndex);
+      pumpFaceQueue();
+    });
+  }
+}
+
+async function runFaceJob({ blockIndex, imageBase64, cameraId }) {
+  try {
+    const result = await callFaceService(imageBase64, cameraId);
+    const decision = result.frDecision || (result.ok ? "UNKNOWN" : "ERROR");
+    const update = { frDecision: decision, faces: result.faces || [], bestMatch: result.bestMatch || null };
+    const block = blockchain.chain[blockIndex];
+    if (block) {
+      block.data.faceAnalysis = update;
+      blockchain.saveChain();
+      wss.clients.forEach((c) => {
+        if (c.readyState === 1) c.send(JSON.stringify({ _frUpdate: true, blockIndex, faceAnalysis: update }));
+      });
+    }
+  } catch (err) {
+    console.error("FR job error:", err.message);
+    const block = blockchain.chain[blockIndex];
+    if (block) {
+      block.data.faceAnalysis = { frDecision: "ERROR", error: err.message };
+      blockchain.saveChain();
+    }
+  }
+}
+
+function enqueueFaceAnalysis(blockIndex, imageBase64, cameraId) {
+  if (!imageBase64) return;
+  faceQueue.push({ blockIndex, imageBase64, cameraId });
+  pumpFaceQueue();
+}
+
+// ES-module __dirname (needed on Mac/local; Ubuntu hardcoded path works on server)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Resolve frontend dir: works locally (Mac) and on Ubuntu server
+const FRONTEND_DIR = fs.existsSync("/home/ubuntu/blockvaultprivate/api-gateway/public")
+  ? "/home/ubuntu/blockvaultprivate/api-gateway/public"
+  : path.join(__dirname, "../blockvaultprivate/api-gateway/public");
+
 // -------------------- Serve frontend --------------------
-const FRONTEND_DIR = "/home/ubuntu/blockvaultprivate/api-gateway/public";
 app.use(express.static(FRONTEND_DIR));
 
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.sendFile(path.join(FRONTEND_DIR, "index.html"));
 });
 
@@ -35,23 +102,80 @@ wss.on("connection", () => {
 });
 
 // -------------------- Blockchain routes --------------------
-app.get("/blocks", (req, res) => res.json(blockchain.chain));
+
+// Return all incidents (skip genesis block) — evidenceUri stripped to keep payload small
+app.get("/blocks", (_req, res) => {
+  const incidents = blockchain.chain.slice(1).map((b) => {
+    const { evidenceUri, ...dataWithoutImage } = b.data;
+    return {
+      ...dataWithoutImage,
+      _hasImage: !!evidenceUri,
+      _blockIndex: b.index,
+      _blockHash: b.hash,
+      _prevHash: b.previousHash,
+      _blockTs: b.timestamp,
+    };
+  });
+  res.json(incidents);
+});
+
+// Serve evidence image for a single block (lazy-loaded by frontend)
+app.get("/block/:index/img", (req, res) => {
+  const idx = parseInt(req.params.index, 10);
+  const block = blockchain.chain[idx];
+  if (!block || !block.data.evidenceUri) return res.status(404).send("No image");
+  const uri = block.data.evidenceUri;
+  const comma = uri.indexOf(",");
+  const base64Data = comma >= 0 ? uri.slice(comma + 1) : uri;
+  const mimeMatch = uri.match(/^data:([^;]+);/);
+  const mime = mimeMatch ? mimeMatch[1] : "image/jpeg";
+  res.setHeader("Content-Type", mime);
+  res.setHeader("Cache-Control", "public, max-age=86400");
+  res.send(Buffer.from(base64Data, "base64"));
+});
 
 app.post("/newEvent", (req, res) => {
-  const payload = req.body || {};
+  const { cameraId, type, severity, meta, imageBase64 } = req.body || {};
+
+  if (!type) return res.status(400).json({ ok: false, error: "type is required" });
+
+  // Hash the image evidence and the metadata for tamper-proof audit trail
+  const evidenceHash = imageBase64
+    ? crypto.createHash("sha256").update(imageBase64).digest("hex")
+    : null;
+
+  const metadataHash = crypto
+    .createHash("sha256")
+    .update(JSON.stringify(meta || {}))
+    .digest("hex");
+
   const data = {
-    type: payload.type || "Unknown Event",
-    confidence: payload.confidence != null ? Number(payload.confidence) : null,
-    meta: payload.meta || {},
+    ts: new Date().toISOString(),
+    cameraId: cameraId || "cam-1",
+    type,
+    severity: severity ?? 50,
+    reasons: meta?.why ? [meta.why] : [],
+    signals: {
+      tamperSuspected: meta?.tamperSuspected ?? false,
+      repositionSuspected: meta?.repositionSuspected ?? false,
+    },
+    evidenceUri: imageBase64 || null,
+    evidenceHash,
+    metadataHash,
+    meta: meta || {},
+    faceAnalysis: imageBase64 ? { frDecision: "PENDING" } : { frDecision: "NO_IMAGE" },
   };
 
   const newBlock = blockchain.addBlock(data);
+
+  // Kick off async face recognition (non-blocking)
+  if (imageBase64) enqueueFaceAnalysis(newBlock.index, imageBase64, cameraId || "cam-1");
 
   wss.clients.forEach((client) => {
     if (client.readyState === 1) client.send(JSON.stringify(newBlock));
   });
 
-  res.json(newBlock);
+  res.json({ ok: true, block: { index: newBlock.index, hash: newBlock.hash, previousHash: newBlock.previousHash, timestamp: newBlock.timestamp } });
 });
 
 // -------------------- Analyze Frame (demo mode) --------------------
@@ -117,7 +241,7 @@ app.post("/analyzeFrame", (req, res) => {
 });
 
 // -------------------- Evidence Viewer page --------------------
-app.get("/review", (req, res) => {
+app.get("/review", (_req, res) => {
   try {
     const files = fs
       .readdirSync(EVIDENCE_DIR)
@@ -173,7 +297,7 @@ app.get("/review", (req, res) => {
         </style>
       </head>
       <body>
-        <h1>📁 Evidence Viewer</h1>
+        <h1>Evidence Viewer</h1>
         <div class="grid">${rows || "<p>No evidence saved yet.</p>"}</div>
       </body>
       </html>`);
@@ -184,6 +308,6 @@ app.get("/review", (req, res) => {
 
 // -------------------- Startup logs --------------------
 app.listen(HTTP_PORT, "0.0.0.0", () => {
-  console.log(`✅ Demo running → http://0.0.0.0:${HTTP_PORT}/index.html`);
+  console.log(`Backend running → http://0.0.0.0:${HTTP_PORT}/index.html`);
 });
-console.log(`🌐 WebSocket → ws://localhost:${WS_PORT}`);
+console.log(`WebSocket → ws://localhost:${WS_PORT}`);
