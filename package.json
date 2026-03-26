@@ -1,13 +1,13 @@
 {
-  "name": "blockvault-poc",
+  "name": "blockvault-backend",
   "version": "1.0.0",
-  "description": "Block Vault Systems - Private blockchain POC",
+  "description": "BlockVault Systems — blockchain backend and security event API",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "author": "Jomari",
+  "author": "Sunil Ganta",
   "license": "ISC",
   "dependencies": {
     "cors": "^2.8.5",

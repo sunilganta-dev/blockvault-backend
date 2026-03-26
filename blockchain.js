@@ -36,7 +36,6 @@ export class Blockchain {
       if (fs.existsSync(this.chainFile)) {
         const raw = fs.readFileSync(this.chainFile, 'utf8');
         const parsed = JSON.parse(raw);
-        // if parsed items don't have methods, keep as plain objects (ok)
         return parsed;
       }
     } catch (err) {
@@ -69,7 +68,6 @@ export class Blockchain {
     const timestamp = new Date().toISOString();
     const previousHash = latest.hash || latest.previousHash || '0';
     const block = new Block(index, timestamp, data, previousHash);
-    // convert to plain object so serialization is stable
     const plain = {
       index: block.index,
       timestamp: block.timestamp,

@@ -178,13 +178,12 @@ app.post("/newEvent", (req, res) => {
   res.json({ ok: true, block: { index: newBlock.index, hash: newBlock.hash, previousHash: newBlock.previousHash, timestamp: newBlock.timestamp } });
 });
 
-// -------------------- Analyze Frame (demo mode) --------------------
+// -------------------- Analyze Frame --------------------
 app.post("/analyzeFrame", (req, res) => {
   try {
-    const { imageBase64, info = {}, demoMode = false, forceSuspicious = false } = req.body || {};
+    const { imageBase64, info = {} } = req.body || {};
     if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
 
-    // Save snapshot into frontend/evidence
     const ts = Date.now();
     const rnd = Math.floor(Math.random() * 1e6);
     const fileExt = imageBase64.startsWith("data:image/png") ? "png" : "jpg";
@@ -194,7 +193,6 @@ app.post("/analyzeFrame", (req, res) => {
     const base64Data = comma >= 0 ? imageBase64.slice(comma + 1) : imageBase64;
     fs.writeFileSync(filepath, Buffer.from(base64Data, "base64"));
 
-    // ----- Demo heuristic (safe) -----
     const detections = Array.isArray(info.detections) ? info.detections : [];
     const classes = detections.map((d) => String(d.class).toLowerCase());
     const motionPercent = typeof info.motionPercent === "number" ? info.motionPercent : 0;
@@ -203,11 +201,7 @@ app.post("/analyzeFrame", (req, res) => {
     let score = 0;
     let labels = [];
 
-    if (forceSuspicious) {
-      suspicious = true;
-      score = 95;
-      labels.push("manual-trigger");
-    } else if (motionPercent >= 40 && classes.length === 0) {
+    if (motionPercent >= 40 && classes.length === 0) {
       suspicious = true;
       score = Math.min(90, Math.round(motionPercent));
       labels.push("high-motion-no-person");
@@ -215,25 +209,14 @@ app.post("/analyzeFrame", (req, res) => {
       suspicious = true;
       score = 85;
       labels.push("backpack-motion");
-    } else if (demoMode && Math.random() < 0.3) {
-      suspicious = true;
-      score = 70;
-      labels.push("demo-randomized");
     }
 
-    // Save metadata JSON
     fs.writeFileSync(
       filepath + ".json",
       JSON.stringify({ info, analysis: { suspicious, score, labels } }, null, 2)
     );
 
-    res.json({
-      suspicious,
-      score,
-      labels,
-      evidenceId: filename,
-      previewUrl: `/evidence/${filename}`,
-    });
+    res.json({ suspicious, score, labels, evidenceId: filename, previewUrl: `/evidence/${filename}` });
   } catch (err) {
     console.error("analyzeFrame error", err);
     res.status(500).json({ error: "internal error" });
@@ -303,6 +286,59 @@ app.get("/review", (_req, res) => {
       </html>`);
   } catch (err) {
     res.status(500).send("<pre>Error reading evidence folder.</pre>");
+  }
+});
+
+// -------------------- Face Enrolment --------------------
+const FR_DB_DIR = fs.existsSync("/home/ubuntu/BlockVault-FR/face_service/face_db/authorized")
+  ? "/home/ubuntu/BlockVault-FR/face_service/face_db/authorized"
+  : null;
+
+app.post("/enrollFace", async (req, res) => {
+  try {
+    const { name, imageBase64 } = req.body || {};
+    if (!name || !imageBase64) return res.status(400).json({ ok: false, error: "Name and image are required." });
+    if (!FR_DB_DIR) return res.status(503).json({ ok: false, error: "FR database not available on this server." });
+
+    // Validate name
+    const safeName = name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+    if (!safeName) return res.status(400).json({ ok: false, error: "Invalid name. Use letters, numbers, underscores or hyphens only." });
+
+    // Validate image format
+    const allowedFormats = ["data:image/jpeg", "data:image/jpg", "data:image/png"];
+    if (!allowedFormats.some((f) => imageBase64.startsWith(f))) {
+      return res.status(400).json({ ok: false, error: "Invalid file format. Only JPEG and PNG images are accepted." });
+    }
+
+    // Validate image size (max 10MB base64 ≈ 7.5MB file)
+    const sizeBytes = Buffer.byteLength(imageBase64, "utf8");
+    if (sizeBytes > 10 * 1024 * 1024) {
+      return res.status(400).json({ ok: false, error: "Image too large. Maximum allowed size is 10MB." });
+    }
+
+    // Check for duplicate
+    const personDir = path.join(FR_DB_DIR, safeName);
+    if (fs.existsSync(personDir)) {
+      return res.status(409).json({ ok: false, error: `Person "${safeName}" already exists in the database. Use a different name or remove the existing entry first.` });
+    }
+
+    fs.mkdirSync(personDir, { recursive: true });
+
+    const comma = imageBase64.indexOf(",");
+    const base64Data = comma >= 0 ? imageBase64.slice(comma + 1) : imageBase64;
+    const fileExt = imageBase64.startsWith("data:image/png") ? "png" : "jpg";
+    fs.writeFileSync(path.join(personDir, `${Date.now()}.${fileExt}`), Buffer.from(base64Data, "base64"));
+
+    const reloadResp = await fetch(`${FACE_SERVICE_URL}/reload`, {
+      method: "POST",
+      signal: AbortSignal.timeout(15000),
+    });
+    const reloadData = await reloadResp.json();
+
+    res.json({ ok: true, name: safeName, db_size: reloadData.db_size, db_embeddings: reloadData.db_embeddings });
+  } catch (err) {
+    console.error("enrollFace error:", err.message);
+    res.status(500).json({ ok: false, error: "Server error during enrollment. Please try again." });
   }
 });
 
